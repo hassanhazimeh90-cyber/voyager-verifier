@@ -118,7 +118,12 @@ pub fn submit(
         return execute_verification(api_client, args, context, license_info);
     }
 
-    info!("Dry run mode: collected files for verification but skipping submission due to --dry-run flag");
+    println!("\n✅ Dry run completed successfully!");
+    println!("Collected {} file(s) for verification", file_infos.len());
+    println!("Contract: {}", args.contract_name);
+    println!("Class hash: {}", args.class_hash);
+    println!("\n⚠️  No verification was submitted due to --dry-run flag");
+    println!("Remove --dry-run to submit for actual verification.\n");
     Ok("dry-run".to_string())
 }
 
