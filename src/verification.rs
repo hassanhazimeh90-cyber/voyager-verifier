@@ -168,13 +168,26 @@ pub fn execute_verification(
             context.project_dir_path
         );
         debug!(
-            "📍 args.path.root_dir() (absolute): {}",
+            "📍 args.path.root_dir() (workspace root): {}",
             args.path.root_dir()
         );
+        debug!(
+            "📍 context.package_meta.root (package root): {}",
+            context.package_meta.root
+        );
 
-        // Use the absolute path for Dojo version extraction
-        let absolute_project_path = args.path.root_dir().to_string();
-        let extracted_version = extract_dojo_version(&absolute_project_path);
+        // Extract from package root first, then fallback to workspace root
+        let workspace_root = args.path.root_dir().to_string();
+        let package_root = context.package_meta.root.to_string();
+
+        // Only pass package root if it's different from workspace root (i.e., workspace scenario)
+        let package_root_opt = if package_root != workspace_root {
+            Some(package_root.as_str())
+        } else {
+            None
+        };
+
+        let extracted_version = extract_dojo_version(&workspace_root, package_root_opt);
         match &extracted_version {
             Some(version) => info!("✅ Successfully extracted Dojo version: {version}"),
             None => warn!(

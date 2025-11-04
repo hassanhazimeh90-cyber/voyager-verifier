@@ -187,7 +187,7 @@ pub fn validate_dojo_project(project: &Project) -> Result<(), CliError> {
 
 /// Extract Dojo version from Scarb.toml
 ///
-/// Attempts to extract the Dojo version from the project's Scarb.toml file.
+/// Attempts to extract the Dojo version from a Scarb.toml file at the given path.
 /// Supports three common dependency formats:
 /// 1. Simple string: `dojo = "1.7.1"`
 /// 2. Git tag: `dojo = { tag = "v0.7.0", git = "..." }`
@@ -195,30 +195,22 @@ pub fn validate_dojo_project(project: &Project) -> Result<(), CliError> {
 ///
 /// # Arguments
 ///
-/// * `project_dir_path` - Absolute path to the project directory containing Scarb.toml
+/// * `scarb_toml_path` - Absolute path to a Scarb.toml file
 ///
 /// # Returns
 ///
 /// Returns `Some(version_string)` if a version is found, `None` otherwise.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let version = extract_dojo_version("/path/to/project");
-/// assert_eq!(version, Some("1.7.1".to_string()));
-/// ```
-pub fn extract_dojo_version(project_dir_path: &str) -> Option<String> {
-    let scarb_toml_path = format!("{project_dir_path}/Scarb.toml");
+fn extract_dojo_version_from_file(scarb_toml_path: &str) -> Option<String> {
     debug!("📁 Looking for Scarb.toml at: {scarb_toml_path}");
 
     // Read the Scarb.toml file
-    let contents = match fs::read_to_string(&scarb_toml_path) {
+    let contents = match fs::read_to_string(scarb_toml_path) {
         Ok(contents) => {
             debug!("📖 Successfully read Scarb.toml ({} bytes)", contents.len());
             contents
         }
         Err(e) => {
-            warn!("❌ Failed to read Scarb.toml at {scarb_toml_path}: {e}");
+            debug!("Cannot read Scarb.toml at {scarb_toml_path}: {e}");
             return None;
         }
     };
@@ -230,7 +222,7 @@ pub fn extract_dojo_version(project_dir_path: &str) -> Option<String> {
             parsed
         }
         Err(e) => {
-            warn!("❌ Failed to parse Scarb.toml: {e}");
+            debug!("Cannot parse Scarb.toml: {e}");
             return None;
         }
     };
@@ -271,14 +263,62 @@ pub fn extract_dojo_version(project_dir_path: &str) -> Option<String> {
             }
 
             warn!("⚠️  Dojo dependency found but no recognized version format (expected string, 'tag', or 'version' field)");
-        } else {
-            warn!("⚠️  Dependencies section found but no 'dojo' dependency");
         }
-    } else {
-        warn!("⚠️  No [dependencies] section found in Scarb.toml");
     }
 
-    info!("❌ No Dojo version found in Scarb.toml");
+    None
+}
+
+/// Attempts to extract the Dojo version from the project's Scarb.toml files.
+/// For workspace projects, it first checks the specific package's Scarb.toml,
+/// then falls back to the workspace root Scarb.toml.
+///
+/// Supports three common dependency formats:
+/// 1. Simple string: `dojo = "1.7.1"`
+/// 2. Git tag: `dojo = { tag = "v0.7.0", git = "..." }`
+/// 3. Version table: `dojo = { version = "2.0.0" }`
+///
+/// # Arguments
+///
+/// * `workspace_root` - Absolute path to the workspace root directory
+/// * `package_root` - Optional absolute path to the specific package directory (for workspaces)
+///
+/// # Returns
+///
+/// Returns `Some(version_string)` if a version is found, `None` otherwise.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // Single package project
+/// let version = extract_dojo_version("/path/to/project", None);
+/// assert_eq!(version, Some("1.7.1".to_string()));
+///
+/// // Workspace with subpackage
+/// let version = extract_dojo_version("/path/to/workspace", Some("/path/to/workspace/packages/my_package"));
+/// assert_eq!(version, Some("1.7.1".to_string()));
+/// ```
+pub fn extract_dojo_version(workspace_root: &str, package_root: Option<&str>) -> Option<String> {
+    // Try package root first (for workspace subpackages)
+    if let Some(pkg_root) = package_root {
+        let pkg_scarb_toml = format!("{pkg_root}/Scarb.toml");
+        info!("🔍 Checking for dojo version in package Scarb.toml: {pkg_scarb_toml}");
+        if let Some(version) = extract_dojo_version_from_file(&pkg_scarb_toml) {
+            info!("✅ Found dojo version in package Scarb.toml");
+            return Some(version);
+        }
+        debug!("⚠️  No dojo version found in package Scarb.toml, checking workspace root");
+    }
+
+    // Fallback to workspace root
+    let workspace_scarb_toml = format!("{workspace_root}/Scarb.toml");
+    info!("🔍 Checking for dojo version in workspace Scarb.toml: {workspace_scarb_toml}");
+    if let Some(version) = extract_dojo_version_from_file(&workspace_scarb_toml) {
+        info!("✅ Found dojo version in workspace root Scarb.toml");
+        return Some(version);
+    }
+
+    warn!("❌ No Dojo version found in any Scarb.toml file");
     None
 }
 
@@ -308,7 +348,7 @@ dojo = "1.7.1"
         )
         .unwrap();
 
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, Some("1.7.1".to_string()));
     }
 
@@ -332,7 +372,7 @@ dojo = { tag = "v0.7.0", git = "https://github.com/dojoengine/dojo" }
         )
         .unwrap();
 
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, Some("v0.7.0".to_string()));
     }
 
@@ -356,7 +396,7 @@ dojo = { version = "2.0.0" }
         )
         .unwrap();
 
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, Some("2.0.0".to_string()));
     }
 
@@ -380,7 +420,7 @@ starknet = "2.0.0"
         )
         .unwrap();
 
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, None);
     }
 
@@ -390,7 +430,7 @@ starknet = "2.0.0"
         let project_path = temp_dir.path().to_str().unwrap();
 
         // Don't create Scarb.toml file
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, None);
     }
 
@@ -403,7 +443,7 @@ starknet = "2.0.0"
         let scarb_toml_path = format!("{project_path}/Scarb.toml");
         fs::write(&scarb_toml_path, "this is not valid toml [[[").unwrap();
 
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, None);
     }
 
@@ -427,7 +467,131 @@ dojo = "3.0.0"
         )
         .unwrap();
 
-        let result = extract_dojo_version(project_path);
+        let result = extract_dojo_version(project_path, None);
         assert_eq!(result, Some("3.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_extract_dojo_version_pistols_example() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().to_str().unwrap();
+
+        // Test with real-world Scarb.toml from pistols project
+        let scarb_toml_path = format!("{project_path}/Scarb.toml");
+        fs::write(
+            &scarb_toml_path,
+            r#"
+[package]
+name = "pistols"
+version.workspace = true
+edition.workspace = true
+cairo-version = ">=2.12.2"
+license = "CC0-1.0"
+
+[cairo]
+sierra-replace-ids = true
+panic-backtrace = true
+
+[dependencies]
+starknet = ">=2.12.2"
+dojo = "1.7.1"
+"#,
+        )
+        .unwrap();
+
+        let result = extract_dojo_version(project_path, None);
+        assert_eq!(result, Some("1.7.1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_dojo_version_workspace_package_priority() {
+        // Test that package Scarb.toml has priority over workspace root
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_root = temp_dir.path().to_str().unwrap();
+
+        // Create workspace root Scarb.toml without dojo
+        let workspace_scarb = format!("{workspace_root}/Scarb.toml");
+        fs::write(
+            &workspace_scarb,
+            r#"
+[workspace]
+members = ["packages/my_package"]
+
+[package]
+name = "workspace"
+version = "1.0.0"
+
+[dependencies]
+starknet = "2.10.0"
+"#,
+        )
+        .unwrap();
+
+        // Create package directory with dojo dependency
+        let package_dir = format!("{workspace_root}/packages/my_package");
+        fs::create_dir_all(&package_dir).unwrap();
+        let package_scarb = format!("{package_dir}/Scarb.toml");
+        fs::write(
+            &package_scarb,
+            r#"
+[package]
+name = "my_package"
+version = "1.0.0"
+
+[dependencies]
+dojo = "1.7.1"
+"#,
+        )
+        .unwrap();
+
+        // Should find dojo in package, not workspace
+        let result = extract_dojo_version(workspace_root, Some(&package_dir));
+        assert_eq!(result, Some("1.7.1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_dojo_version_workspace_fallback() {
+        // Test fallback to workspace root when package doesn't have dojo
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_root = temp_dir.path().to_str().unwrap();
+
+        // Create workspace root Scarb.toml with dojo
+        let workspace_scarb = format!("{workspace_root}/Scarb.toml");
+        fs::write(
+            &workspace_scarb,
+            r#"
+[workspace]
+members = ["packages/my_package"]
+
+[package]
+name = "workspace"
+version = "1.0.0"
+
+[dependencies]
+dojo = "2.0.0"
+"#,
+        )
+        .unwrap();
+
+        // Create package directory without dojo
+        let package_dir = format!("{workspace_root}/packages/my_package");
+        fs::create_dir_all(&package_dir).unwrap();
+        let package_scarb = format!("{package_dir}/Scarb.toml");
+        fs::write(
+            &package_scarb,
+            r#"
+[package]
+name = "my_package"
+version = "1.0.0"
+
+[dependencies]
+starknet = "2.10.0"
+"#,
+        )
+        .unwrap();
+
+        // Should fallback to workspace root
+        let result = extract_dojo_version(workspace_root, Some(&package_dir));
+        assert_eq!(result, Some("2.0.0".to_string()));
     }
 }

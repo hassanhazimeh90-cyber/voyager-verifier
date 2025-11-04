@@ -77,7 +77,7 @@ pub fn prepare_project_for_verification(
             })?;
 
     // Prepare project directory path
-    let project_dir_path = prepare_project_dir_path(args, &prefix)?;
+    let project_dir_path = prepare_project_dir_path(package_meta, args, &prefix)?;
 
     // Convert to FileInfo
     let file_infos = convert_to_file_info(files);
@@ -284,7 +284,9 @@ pub fn add_workspace_manifest_if_needed(
     let workspace_manifest = &metadata.workspace.manifest_path;
     let manifest_path = voyager::manifest_path(metadata);
 
-    let is_workspace = workspace_manifest != manifest_path && metadata.workspace.members.len() > 1;
+    // Include workspace manifest if it's different from the package manifest
+    // This indicates we're in a workspace subpackage
+    let is_workspace = workspace_manifest != manifest_path;
 
     if is_workspace {
         let workspace_manifest_rel =
@@ -403,40 +405,32 @@ pub fn find_contract_file(
 
 /// Prepare project directory path
 ///
-/// Converts the project root directory to a relative path from the common prefix.
-/// Returns "." if the path is empty (for root-level projects).
+/// Always returns "." to indicate the build should run from the workspace/project root.
+/// The file structure itself (with proper paths) tells the build tool where packages are located.
+///
+/// This ensures that workspace builds work correctly - scarb/sozo will automatically
+/// discover workspace members and build the correct package based on the file structure.
 ///
 /// # Arguments
 ///
-/// * `args` - Verification arguments
-/// * `prefix` - Common prefix to strip from paths
+/// * `package_meta` - Package metadata (unused but kept for API consistency)
+/// * `args` - Verification arguments (unused but kept for API consistency)
+/// * `prefix` - Common prefix (unused but kept for API consistency)
 ///
 /// # Returns
 ///
-/// Returns the relative project directory path as a string
+/// Returns "." to indicate root directory
 ///
 /// # Errors
 ///
-/// Returns a `CliError` if path manipulation fails
-pub fn prepare_project_dir_path(args: &VerifyArgs, prefix: &Utf8Path) -> Result<String, CliError> {
-    let project_dir_path = args
-        .path
-        .root_dir()
-        .strip_prefix(prefix)
-        .map_err(|_| CliError::StripPrefix {
-            path: args.path.root_dir().clone(),
-            prefix: prefix.to_path_buf(),
-        })
-        // backend expects this for cwd
-        .map(|p| {
-            if p == Utf8Path::new("") {
-                Utf8Path::new(".")
-            } else {
-                p
-            }
-        })?;
-
-    Ok(project_dir_path.to_string())
+/// Never fails (Result for API consistency)
+pub fn prepare_project_dir_path(
+    _package_meta: &PackageMetadata,
+    _args: &VerifyArgs,
+    _prefix: &Utf8Path,
+) -> Result<String, CliError> {
+    // Always use "." (root) - the file paths themselves define the structure
+    Ok(".".to_string())
 }
 
 /// Convert to `FileInfo`
