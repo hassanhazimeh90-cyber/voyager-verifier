@@ -8,8 +8,18 @@ target/
 bin/
 .vscode/
 
+# mdBook generated output
+book/
+docs/.mdbook-cache/
+
 .claude/
 
-
+# Local configuration files (keep .voyager.toml.example tracked)
+.voyager.toml
 
 CLAUDE.md
+
+# Temporary docs ignores
+RELEASE_2.0.0_WORKFLOW.md
+FEATURE_RECOMMENDATIONS.md
+feature-opportunities.md

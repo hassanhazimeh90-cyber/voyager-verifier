@@ -9,20 +9,19 @@
 //! - Managing the verification lifecycle from submission to completion
 
 use crate::api::{
-    poll_verification_status, ApiClient, ApiClientError, FileInfo, ProjectMetadataInfo,
-    VerificationError, VerificationJob, VerifyJobStatus,
+    ApiClient, ApiClientError, FileInfo, ProjectMetadataInfo, VerificationError, VerificationJob,
+    VerifyJobStatus,
 };
 use crate::args::VerifyArgs;
 use crate::errors::CliError;
 use crate::file_collector::{log_verification_info, prepare_project_for_verification};
+use crate::history::{HistoryDb, VerificationRecord};
 use crate::license;
 use crate::project::{determine_project_type, extract_dojo_version, ProjectType};
 use crate::resolver::{collect_source_files, gather_packages_and_validate};
-use chrono::{DateTime, Utc};
 use colored::*;
 use log::{debug, info, warn};
 use scarb_metadata::PackageMetadata;
-use std::time::{Duration, UNIX_EPOCH};
 
 /// Context information for a verification job
 ///
@@ -72,6 +71,20 @@ pub fn submit(
 ) -> Result<String, CliError> {
     info!("🚀 Starting verification for project at: {}", args.path);
 
+    // Validate required fields are present (they should be if not in wizard mode, or populated by wizard)
+    let class_hash = args
+        .class_hash
+        .as_ref()
+        .ok_or_else(|| CliError::InternalError {
+            message: "class_hash should be present - either from CLI args or wizard".to_string(),
+        })?;
+    let contract_name = args
+        .contract_name
+        .as_ref()
+        .ok_or_else(|| CliError::InternalError {
+            message: "contract_name should be present - either from CLI args or wizard".to_string(),
+        })?;
+
     // Determine project type early in the process
     let project_type = determine_project_type(args)?;
 
@@ -118,10 +131,80 @@ pub fn submit(
         return execute_verification(api_client, args, context, license_info);
     }
 
+    // Dry run: Build and display the full payload that would be sent
     println!("\n✅ Dry run completed successfully!");
     println!("Collected {} file(s) for verification", file_infos.len());
-    println!("Contract: {}", args.contract_name);
-    println!("Class hash: {}", args.class_hash);
+    println!("Contract: {}", contract_name);
+    println!("Class hash: {}", class_hash);
+
+    // Build the complete payload
+    let cairo_version = metadata.app_version_info.cairo.version.clone();
+    let scarb_version = metadata.app_version_info.version.clone();
+
+    // Extract Dojo version if it's a Dojo project (same logic as execute_verification)
+    let dojo_version = if project_type == ProjectType::Dojo {
+        let workspace_root = args.path.root_dir().to_string();
+        let package_root = package_meta.root.to_string();
+        let package_root_opt = if package_root != workspace_root {
+            Some(package_root.as_str())
+        } else {
+            None
+        };
+        extract_dojo_version(&workspace_root, package_root_opt)
+    } else {
+        None
+    };
+
+    // Prepare license value (same logic as in API client)
+    let license_str = license_info.display_string().to_string();
+    let license_value = if license_str == "MIT" {
+        "MIT".to_string()
+    } else {
+        license_str
+    };
+
+    // Build the request payload structure (without file contents for brevity)
+    #[derive(serde::Serialize)]
+    struct DryRunPayload {
+        compiler_version: String,
+        scarb_version: String,
+        package_name: String,
+        name: String,
+        contract_file: String,
+        #[serde(rename = "contract-name")]
+        contract_name: String,
+        project_dir_path: String,
+        build_tool: String,
+        license: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dojo_version: Option<String>,
+        file_count: usize,
+        file_list: Vec<String>,
+    }
+
+    let payload = DryRunPayload {
+        compiler_version: cairo_version.to_string(),
+        scarb_version: scarb_version.to_string(),
+        package_name: package_meta.name,
+        name: contract_name.to_string(),
+        contract_file: contract_file.clone(),
+        contract_name: contract_file,
+        project_dir_path,
+        build_tool: project_type.to_string(),
+        license: license_value,
+        dojo_version,
+        file_count: file_infos.len(),
+        file_list: file_infos.iter().map(|f| f.name.clone()).collect(),
+    };
+
+    // Display the payload as pretty-printed JSON
+    println!("\n{}", "=== API Request Payload ===".bright_cyan().bold());
+    match serde_json::to_string_pretty(&payload) {
+        Ok(json) => println!("{}", json),
+        Err(e) => warn!("Failed to serialize payload to JSON: {}", e),
+    }
+    println!("{}\n", "=== End Payload ===".bright_cyan().bold());
+
     println!("\n⚠️  No verification was submitted due to --dry-run flag");
     println!("Remove --dry-run to submit for actual verification.\n");
     Ok("dry-run".to_string())
@@ -155,9 +238,27 @@ pub fn execute_verification(
     context: VerificationContext,
     license_info: &license::LicenseInfo,
 ) -> Result<String, CliError> {
+    // Extract required fields
+    let class_hash = args
+        .class_hash
+        .as_ref()
+        .ok_or_else(|| CliError::InternalError {
+            message: "class_hash should be present".to_string(),
+        })?;
+    let contract_name = args
+        .contract_name
+        .as_ref()
+        .ok_or_else(|| CliError::InternalError {
+            message: "contract_name should be present".to_string(),
+        })?;
+
     let metadata = args.path.metadata();
     let cairo_version = metadata.app_version_info.cairo.version.clone();
     let scarb_version = metadata.app_version_info.version.clone();
+
+    // Save version strings for history tracking before they are moved
+    let cairo_version_str = cairo_version.to_string();
+    let scarb_version_str = scarb_version.to_string();
 
     // Create project metadata with build tool information
     debug!(
@@ -205,6 +306,9 @@ pub fn execute_verification(
         None
     };
 
+    // Save package name before it's moved
+    let package_name = context.package_meta.name.clone();
+
     let project_meta = ProjectMetadataInfo::new(
         cairo_version,
         scarb_version,
@@ -212,36 +316,126 @@ pub fn execute_verification(
         context.contract_file,
         context.package_meta.name,
         context.project_type,
-        dojo_version,
+        dojo_version.clone(),
     );
     debug!(
         "Created ProjectMetadataInfo with build_tool: {}, dojo_version: {:?}",
         project_meta.build_tool, project_meta.dojo_version
     );
 
-    api_client
+    let job_id = api_client
         .verify_class(
-            &args.class_hash,
+            class_hash,
             Some(license_info.display_string().to_string()),
-            &args.contract_name,
+            contract_name,
             project_meta,
             &context.file_infos,
         )
-        .map_err(CliError::from)
+        .map_err(CliError::from)?;
+
+    // Determine network from args
+    let network = if let Some(ref net) = args.network {
+        match net {
+            crate::args::NetworkKind::Mainnet => "mainnet",
+            crate::args::NetworkKind::Sepolia => "sepolia",
+            crate::args::NetworkKind::Dev => "dev",
+        }
+    } else {
+        // Extract from URL if network not specified
+        let url = args.network_url.url.as_str();
+        if url.contains("sepolia") {
+            "sepolia"
+        } else if url.contains("dev") {
+            "dev"
+        } else if url.contains("mainnet") || url.contains("api.voyager.online") {
+            "mainnet"
+        } else {
+            "custom"
+        }
+    };
+
+    // Save verification record to history database
+    if let Err(e) = save_to_history(HistoryParams {
+        job_id: &job_id,
+        class_hash,
+        contract_name,
+        network,
+        cairo_version: &cairo_version_str,
+        scarb_version: &scarb_version_str,
+        dojo_version: dojo_version.as_deref(),
+        package_name: &package_name,
+    }) {
+        warn!("Failed to save verification to history: {e}");
+        // Don't fail the verification if history save fails
+    }
+
+    Ok(job_id)
+}
+
+/// Parameters for saving verification history
+struct HistoryParams<'a> {
+    job_id: &'a str,
+    class_hash: &'a crate::class_hash::ClassHash,
+    contract_name: &'a str,
+    network: &'a str,
+    cairo_version: &'a str,
+    scarb_version: &'a str,
+    dojo_version: Option<&'a str>,
+    package_name: &'a str,
+}
+
+/// Save a verification record to the history database
+fn save_to_history(params: HistoryParams<'_>) -> Result<(), crate::history::HistoryError> {
+    let db = HistoryDb::open()?;
+
+    let record = VerificationRecord::new(
+        params.job_id.to_string(),
+        params.class_hash,
+        params.contract_name.to_string(),
+        params.network.to_string(),
+        VerifyJobStatus::Submitted,
+        Some(params.package_name.to_string()),
+        params.scarb_version.to_string(),
+        params.cairo_version.to_string(),
+        params.dojo_version.map(String::from),
+    );
+
+    db.insert(&record)?;
+    info!("Saved verification record to history database");
+
+    Ok(())
+}
+
+/// Update the status of a verification record in the history database
+fn update_history_status(
+    job_id: &str,
+    status: VerifyJobStatus,
+) -> Result<(), crate::history::HistoryError> {
+    let db = HistoryDb::open()?;
+
+    // Get the existing record to update it
+    if let Some(mut record) = db.get_by_job_id(job_id)? {
+        record.update_status(status);
+        db.update_status(job_id, &record.status, record.completed_at)?;
+        debug!("Updated verification history for job {job_id} to status {status}");
+    } else {
+        debug!("Job {job_id} not found in history database, skipping update");
+    }
+
+    Ok(())
 }
 
 /// Check the status of a verification job
 ///
 /// This function polls the verification service for the status of a job and
-/// displays the results to the user. It handles all possible job states:
-/// - Success: Displays verification details and Voyager link
-/// - Fail/CompileFailed: Shows error messages
-/// - Processing/Submitted/Compiled: Shows progress information
+/// displays the results to the user in the specified format. It handles all
+/// possible job states and formats output as text, JSON, or table.
 ///
 /// # Arguments
 ///
 /// * `api_client` - The API client for communicating with the verification service
 /// * `job_id` - The unique identifier of the verification job
+/// * `format` - The output format (Text, Json, or Table)
 ///
 /// # Returns
 ///
@@ -250,134 +444,52 @@ pub fn execute_verification(
 /// # Errors
 ///
 /// Returns a `CliError` if polling the status fails or the API returns an error.
-pub fn check(api_client: &ApiClient, job_id: &str) -> Result<VerificationJob, CliError> {
-    let status = poll_verification_status(api_client, job_id).map_err(CliError::from)?;
+pub fn check(
+    api_client: &ApiClient,
+    job_id: &str,
+    format: &crate::args::OutputFormat,
+) -> Result<VerificationJob, CliError> {
+    // Use polling with callback to show status updates during watch
+    let format_copy = *format;
 
-    match status.status() {
-        VerifyJobStatus::Success => {
-            println!("\n✅ Verification successful!");
-            if let Some(name) = status.name() {
-                println!("Contract name: {name}");
-            }
-            if let Some(file) = status.contract_file() {
-                println!("Contract file: {file}");
-            }
-            if let Some(version) = status.version() {
-                println!("Cairo version: {version}");
-            }
-            if let Some(dojo_version) = status.dojo_version() {
-                println!("Dojo version: {dojo_version}");
-            }
-            if let Some(license) = status.license() {
-                println!("License: {license}");
-            }
-            if let Some(address) = status.address() {
-                println!("Contract address: {address}");
-            }
-            println!("Class hash: {}", status.class_hash());
-            if let Some(created) = status.created_timestamp() {
-                println!("Created: {}", format_timestamp(created));
-            }
-            if let Some(updated) = status.updated_timestamp() {
-                println!("Last updated: {}", format_timestamp(updated));
-            }
-            println!("\nThe contract is now verified and visible on Voyager at https://voyager.online/class/{} .", status.class_hash());
-        }
-        VerifyJobStatus::Fail => {
-            println!("\n❌ Verification failed!");
-            if let Some(desc) = status.status_description() {
-                println!("Reason: {desc}");
-            }
-            if let Some(created) = status.created_timestamp() {
-                println!("Started: {}", format_timestamp(created));
-            }
-            if let Some(updated) = status.updated_timestamp() {
-                println!("Failed: {}", format_timestamp(updated));
-            }
-        }
-        VerifyJobStatus::CompileFailed => {
-            println!("\n❌ Compilation failed!");
-            if let Some(desc) = status.status_description() {
-                println!("Reason: {desc}");
-            }
-            if let Some(created) = status.created_timestamp() {
-                println!("Started: {}", format_timestamp(created));
-            }
-            if let Some(updated) = status.updated_timestamp() {
-                println!("Failed: {}", format_timestamp(updated));
-            }
-        }
-        VerifyJobStatus::Processing => {
-            println!("\n⏳ Contract verification is being processed...");
-            println!("Job ID: {}", status.job_id());
-            println!("Status: Processing");
-            if let Some(created) = status.created_timestamp() {
-                println!("Started: {}", format_timestamp(created));
-            }
-            if let Some(updated) = status.updated_timestamp() {
-                println!("Last updated: {}", format_timestamp(updated));
-            }
-            println!("\nUse the same command to check progress later.");
-        }
-        VerifyJobStatus::Submitted => {
-            println!("\n⏳ Verification job submitted and waiting for processing...");
-            println!("Job ID: {}", status.job_id());
-            println!("Status: Submitted");
-            if let Some(created) = status.created_timestamp() {
-                println!("Submitted: {}", format_timestamp(created));
-            }
-            println!("\nUse the same command to check progress later.");
-        }
-        VerifyJobStatus::Compiled => {
-            println!("\n⏳ Contract compiled successfully, verification in progress...");
-            println!("Job ID: {}", status.job_id());
-            println!("Status: Compiled");
-            if let Some(created) = status.created_timestamp() {
-                println!("Started: {}", format_timestamp(created));
-            }
-            if let Some(updated) = status.updated_timestamp() {
-                println!("Last updated: {}", format_timestamp(updated));
-            }
-            println!("\nUse the same command to check progress later.");
-        }
-        _ => {
-            println!("\n⏳ Verification in progress...");
-            println!("Job ID: {}", status.job_id());
-            println!("Status: {}", status.status());
-            if let Some(created) = status.created_timestamp() {
-                println!("Started: {}", format_timestamp(created));
-            }
-            if let Some(updated) = status.updated_timestamp() {
-                println!("Last updated: {}", format_timestamp(updated));
-            }
-            println!("\nUse the same command to check progress later.");
-        }
-    }
+    // For text format, show live inline status updates
+    if format_copy == crate::args::OutputFormat::Text {
+        let callback = |status: &VerificationJob| {
+            let inline_status = crate::status_output::format_inline_status(status);
+            // Clear line and update with new status
+            print!("\r\x1B[2K{}", inline_status);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        };
 
-    Ok(status)
-}
+        let status =
+            crate::api::poll_verification_status_with_callback(api_client, job_id, Some(&callback))
+                .map_err(CliError::from)?;
 
-/// Format a Unix timestamp as an RFC3339 string
-///
-/// Converts a floating-point Unix timestamp into a human-readable RFC3339
-/// formatted date-time string. If the timestamp cannot be converted (e.g.,
-/// it's out of range), returns the timestamp as a string instead.
-///
-/// # Arguments
-///
-/// * `timestamp` - Unix timestamp as a floating-point number
-///
-/// # Returns
-///
-/// Returns an RFC3339 formatted string like "2024-01-15T10:30:00+00:00",
-/// or the timestamp as a string if conversion fails.
-fn format_timestamp(timestamp: f64) -> String {
-    let duration = Duration::from_secs_f64(timestamp);
-    if let Some(datetime) = UNIX_EPOCH.checked_add(duration) {
-        let datetime: DateTime<Utc> = datetime.into();
-        datetime.to_rfc3339()
+        // Update history database with latest status
+        if let Err(e) = update_history_status(job_id, *status.status()) {
+            warn!("Failed to update verification history: {e}");
+        }
+
+        // Print newline and show final detailed status
+        println!();
+        let output = crate::status_output::format_status(&status, format);
+        println!("{}", output);
+
+        Ok(status)
     } else {
-        timestamp.to_string()
+        // For JSON/table formats, just poll without live updates
+        let status = crate::api::poll_verification_status_with_callback(api_client, job_id, None)
+            .map_err(CliError::from)?;
+
+        if let Err(e) = update_history_status(job_id, *status.status()) {
+            warn!("Failed to update verification history: {e}");
+        }
+
+        let output = crate::status_output::format_status(&status, format);
+        println!("{}", output);
+
+        Ok(status)
     }
 }
 
@@ -415,4 +527,444 @@ pub fn display_verbose_error(error: &CliError) {
         eprintln!("{}", raw_message);
         eprintln!("{}\n", "--- End Error Output ---".bright_yellow());
     }
+}
+
+// ============================================================================
+// Batch Verification Support
+// ============================================================================
+
+/// A single contract in a batch verification job
+#[derive(Debug, Clone)]
+pub struct BatchContract {
+    pub class_hash: crate::class_hash::ClassHash,
+    pub contract_name: String,
+    pub package: Option<String>,
+}
+
+/// Result of a batch contract verification
+#[derive(Debug, Clone)]
+pub struct BatchVerificationResult {
+    pub contract: BatchContract,
+    pub job_id: Option<String>,
+    pub status: Option<VerifyJobStatus>,
+    pub error: Option<String>,
+}
+
+/// Summary of batch verification
+#[derive(Debug, Clone)]
+pub struct BatchVerificationSummary {
+    pub total: usize,
+    pub submitted: usize,
+    pub results: Vec<BatchVerificationResult>,
+}
+
+/// Submit multiple contracts for verification in batch mode
+///
+/// This function orchestrates batch verification by:
+/// 1. Parsing contracts from config
+/// 2. Creating individual `VerifyArgs` for each contract
+/// 3. Submitting each contract using existing `submit()` logic
+/// 4. Collecting results and returning summary
+///
+/// # Arguments
+///
+/// * `api_client` - The API client for communicating with the verification service
+/// * `args` - Base verification arguments (network, watch, etc.)
+/// * `config` - Configuration containing the list of contracts to verify
+/// * `license_info` - License information for the contracts
+///
+/// # Returns
+///
+/// Returns a `BatchVerificationSummary` with results for all contracts
+///
+/// # Errors
+///
+/// Returns a `CliError` if batch verification fails critically
+pub fn submit_batch(
+    api_client: &ApiClient,
+    args: &VerifyArgs,
+    config: &crate::config::Config,
+    license_info: &license::LicenseInfo,
+) -> Result<BatchVerificationSummary, CliError> {
+    info!(
+        "🚀 Starting batch verification for {} contracts",
+        config.contracts.len()
+    );
+
+    let mut results = Vec::new();
+    let total = config.contracts.len();
+
+    for (index, contract_config) in config.contracts.iter().enumerate() {
+        println!(
+            "\n{} Verifying: {}",
+            format!("[{}/{}]", index + 1, total).bright_cyan().bold(),
+            contract_config.contract_name.bright_white().bold()
+        );
+
+        // Parse class hash
+        let class_hash = match crate::class_hash::ClassHash::new(&contract_config.class_hash) {
+            Ok(hash) => hash,
+            Err(e) => {
+                let error_msg = format!("Invalid class hash: {}", e);
+                println!("  {} {}", "✗".red().bold(), error_msg.red());
+                if args.fail_fast {
+                    return Err(CliError::from(e));
+                }
+                // Skip this contract and continue with the next one
+                continue;
+            }
+        };
+
+        // Create individual VerifyArgs for this contract
+        let mut contract_args = args.clone();
+        contract_args.class_hash = Some(class_hash.clone());
+        contract_args.contract_name = Some(contract_config.contract_name.clone());
+        contract_args.package = contract_config
+            .package
+            .clone()
+            .or_else(|| contract_args.package.clone());
+
+        // Submit using existing submit() function (reuse all existing logic!)
+        let result = match submit(api_client, &contract_args, license_info) {
+            Ok(job_id) if job_id != "dry-run" => {
+                println!(
+                    "  {} Submitted - Job ID: {}",
+                    "✓".green().bold(),
+                    job_id.green()
+                );
+                BatchVerificationResult {
+                    contract: BatchContract {
+                        class_hash: class_hash.clone(),
+                        contract_name: contract_config.contract_name.clone(),
+                        package: contract_config.package.clone(),
+                    },
+                    job_id: Some(job_id),
+                    status: Some(VerifyJobStatus::Submitted),
+                    error: None,
+                }
+            }
+            Ok(_) => {
+                // dry-run mode
+                BatchVerificationResult {
+                    contract: BatchContract {
+                        class_hash: class_hash.clone(),
+                        contract_name: contract_config.contract_name.clone(),
+                        package: contract_config.package.clone(),
+                    },
+                    job_id: None,
+                    status: None,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                println!("  {} Failed: {}", "✗".red().bold(), e.to_string().red());
+                if args.fail_fast {
+                    return Err(e);
+                }
+                BatchVerificationResult {
+                    contract: BatchContract {
+                        class_hash: class_hash.clone(),
+                        contract_name: contract_config.contract_name.clone(),
+                        package: contract_config.package.clone(),
+                    },
+                    job_id: None,
+                    status: None,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+
+        results.push(result);
+
+        // Rate limiting delay between submissions
+        if index < total - 1 {
+            if let Some(delay_secs) = args.batch_delay {
+                println!(
+                    "  {} Waiting {} seconds before next submission...",
+                    "⏳".yellow(),
+                    delay_secs
+                );
+                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+            }
+        }
+    }
+
+    let submitted = results.iter().filter(|r| r.job_id.is_some()).count();
+
+    Ok(BatchVerificationSummary {
+        total,
+        submitted,
+        results,
+    })
+}
+
+/// Watch all batch verification jobs until completion
+///
+/// This function polls all submitted jobs in the batch until they reach
+/// a terminal state (Success, Fail, or `CompileFailed`).
+///
+/// # Arguments
+///
+/// * `api_client` - The API client for communicating with the verification service
+/// * `summary` - The batch summary from initial submission
+/// * `output_format` - The desired output format for status display
+///
+/// # Returns
+///
+/// Returns an updated `BatchVerificationSummary` with final statuses
+///
+/// # Errors
+///
+/// Returns a `CliError` if polling fails critically
+pub fn watch_batch(
+    api_client: &ApiClient,
+    summary: &BatchVerificationSummary,
+    output_format: &crate::args::OutputFormat,
+) -> Result<BatchVerificationSummary, CliError> {
+    let job_ids: Vec<&str> = summary
+        .results
+        .iter()
+        .filter_map(|r| r.job_id.as_deref())
+        .collect();
+
+    if job_ids.is_empty() {
+        return Ok(summary.clone()); // Nothing to watch
+    }
+
+    println!(
+        "\n{} Watching {} verification job(s)...\n",
+        "⏳".yellow(),
+        job_ids.len()
+    );
+
+    let mut updated_results = summary.results.clone();
+    let mut iteration = 0;
+
+    // Poll all jobs until complete
+    loop {
+        let mut all_complete = true;
+        iteration += 1;
+
+        for result in &mut updated_results {
+            if let Some(ref job_id) = result.job_id {
+                // Skip if already in terminal state
+                if matches!(
+                    result.status,
+                    Some(VerifyJobStatus::Success)
+                        | Some(VerifyJobStatus::Fail)
+                        | Some(VerifyJobStatus::CompileFailed)
+                ) {
+                    continue;
+                }
+
+                // Check job status (single API call, no retry)
+                match api_client.get_job_status(job_id.to_string()) {
+                    Ok(Some(status)) => {
+                        let new_status = *status.status();
+                        let status_changed = result.status != Some(new_status);
+                        result.status = Some(new_status);
+
+                        // Check if still pending
+                        if !matches!(
+                            new_status,
+                            VerifyJobStatus::Success
+                                | VerifyJobStatus::Fail
+                                | VerifyJobStatus::CompileFailed
+                        ) {
+                            all_complete = false;
+                        }
+
+                        // Log status change
+                        if status_changed {
+                            debug!("Job {} status changed to {}", job_id, new_status);
+                        }
+                    }
+                    Ok(None) => {
+                        // Job still in progress
+                        all_complete = false;
+                    }
+                    Err(e) => {
+                        warn!("Failed to check job {}: {}", job_id, e);
+                        result.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+
+        // Display status update
+        if output_format == &crate::args::OutputFormat::Text {
+            print_batch_status_inline(&updated_results, iteration);
+        }
+
+        if all_complete {
+            println!(); // Newline after inline status
+            break;
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    Ok(BatchVerificationSummary {
+        total: summary.total,
+        submitted: summary.submitted,
+        results: updated_results,
+    })
+}
+
+/// Print batch verification status inline (for live updates)
+fn print_batch_status_inline(results: &[BatchVerificationResult], _iteration: u32) {
+    let succeeded = results
+        .iter()
+        .filter(|r| matches!(r.status, Some(VerifyJobStatus::Success)))
+        .count();
+
+    let failed = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                Some(VerifyJobStatus::Fail) | Some(VerifyJobStatus::CompileFailed)
+            ) || r.error.is_some()
+        })
+        .count();
+
+    let pending = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                Some(VerifyJobStatus::Submitted)
+                    | Some(VerifyJobStatus::Processing)
+                    | Some(VerifyJobStatus::Compiled)
+            )
+        })
+        .count();
+
+    print!(
+        "\r\x1B[2K  {} {} | {} {} | {} {}",
+        "✓".green(),
+        format!("{} Succeeded", succeeded).green(),
+        "⏳".yellow(),
+        format!("{} Pending", pending).yellow(),
+        "✗".red(),
+        format!("{} Failed", failed).red()
+    );
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+}
+
+/// Display batch verification summary
+///
+/// Shows a formatted summary of the batch verification results including
+/// total contracts, submission counts, and success/failure statistics.
+///
+/// # Arguments
+///
+/// * `summary` - The batch verification summary to display
+pub fn display_batch_summary(summary: &BatchVerificationSummary) {
+    let succeeded = summary
+        .results
+        .iter()
+        .filter(|r| matches!(r.status, Some(VerifyJobStatus::Success)))
+        .count();
+
+    let failed = summary
+        .results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                Some(VerifyJobStatus::Fail) | Some(VerifyJobStatus::CompileFailed)
+            ) || r.error.is_some()
+        })
+        .count();
+
+    let pending = summary
+        .results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                Some(VerifyJobStatus::Submitted)
+                    | Some(VerifyJobStatus::Processing)
+                    | Some(VerifyJobStatus::Compiled)
+            )
+        })
+        .count();
+
+    println!("\n{}", "═".repeat(60).bright_cyan());
+    println!("{}", "Batch Verification Summary".bright_cyan().bold());
+    println!("{}", "═".repeat(60).bright_cyan());
+    println!("Total contracts:  {}", summary.total);
+    println!("Submitted:        {}", summary.submitted.to_string().cyan());
+    println!("Succeeded:        {}", succeeded.to_string().green());
+    println!("Failed:           {}", failed.to_string().red());
+    println!("Pending:          {}", pending.to_string().yellow());
+    println!("{}", "═".repeat(60).bright_cyan());
+
+    // Show detailed results
+    println!("\n{}", "Contract Details:".bright_white().bold());
+    for result in &summary.results {
+        let contract_name = result.contract.contract_name.bright_white().bold();
+        let class_hash_short = format!(
+            "{}...{}",
+            &result.contract.class_hash.to_string()[..10],
+            &result.contract.class_hash.to_string()
+                [result.contract.class_hash.to_string().len() - 6..]
+        );
+
+        match (&result.status, &result.error) {
+            (Some(VerifyJobStatus::Success), _) => {
+                let job_id = result.job_id.as_deref().unwrap_or("-");
+                println!(
+                    "  {} {} ({})",
+                    "✓".green().bold(),
+                    contract_name,
+                    class_hash_short.bright_black()
+                );
+                println!("    Job ID: {}", job_id.cyan());
+            }
+            (Some(VerifyJobStatus::Fail), _) | (Some(VerifyJobStatus::CompileFailed), _) => {
+                println!(
+                    "  {} {} ({})",
+                    "✗".red().bold(),
+                    contract_name,
+                    class_hash_short.bright_black()
+                );
+                println!("    Status: {}", "Failed".red());
+            }
+            (Some(status), _) => {
+                let job_id = result.job_id.as_deref().unwrap_or("-");
+                println!(
+                    "  {} {} ({})",
+                    "⏳".yellow(),
+                    contract_name,
+                    class_hash_short.bright_black()
+                );
+                println!("    Status: {}", status.to_string().yellow());
+                println!("    Job ID: {}", job_id.cyan());
+            }
+            (None, Some(err)) => {
+                println!(
+                    "  {} {} ({})",
+                    "✗".red().bold(),
+                    contract_name,
+                    class_hash_short.bright_black()
+                );
+                // Extract just the first line of the error (before suggestions)
+                let error_line = err.lines().next().unwrap_or(err);
+                println!("    Error: {}", error_line.red());
+            }
+            (None, None) => {
+                println!(
+                    "  {} {} ({})",
+                    "○".bright_black(),
+                    contract_name,
+                    class_hash_short.bright_black()
+                );
+                println!("    Status: Not submitted");
+            }
+        }
+    }
+    println!();
 }

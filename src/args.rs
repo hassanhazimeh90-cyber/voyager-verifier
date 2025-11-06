@@ -239,12 +239,12 @@ pub enum Commands {
     ///   voyager verify --network mainnet \
     ///     --class-hash 0x044dc2b3239382230d8b1e943df23b96f52eebcac93efe6e8bde92f9a2f1da18 \
     ///     --contract-name `MyContract`
-    ///   
+    ///
     ///   # Using development network
     ///   voyager verify --network dev \
     ///     --class-hash 0x044dc2b3239382230d8b1e943df23b96f52eebcac93efe6e8bde92f9a2f1da18 \
     ///     --contract-name `MyContract`
-    ///   
+    ///
     ///   # Using custom API endpoint
     ///   voyager verify --url <https://api.custom.com/beta> \
     ///     --class-hash 0x044dc2b3239382230d8b1e943df23b96f52eebcac93efe6e8bde92f9a2f1da18 \
@@ -259,16 +259,43 @@ pub enum Commands {
     /// Examples:
     ///   # Using predefined network
     ///   voyager status --network mainnet --job 12345678-1234-1234-1234-123456789012
-    ///   
+    ///
     ///   # Using development network
     ///   voyager status --network dev --job 12345678-1234-1234-1234-123456789012
-    ///   
+    ///
     ///   # Using custom API endpoint
     ///   voyager status --url <https://api.custom.com/beta> --job 12345678-1234-1234-1234-123456789012
     Status(StatusArgs),
+
+    /// Manage verification history
+    ///
+    /// Track and query past verification jobs stored locally in ~/.voyager/history.db
+    ///
+    /// Examples:
+    ///   # List all verification jobs
+    ///   voyager history list
+    ///
+    ///   # List successful verifications only
+    ///   voyager history list --status success
+    ///
+    ///   # List jobs for specific network
+    ///   voyager history list --network mainnet
+    ///
+    ///   # Get status of a specific job
+    ///   voyager history status --job 12345678-1234-1234-1234-123456789012
+    ///
+    ///   # Re-check status of pending jobs
+    ///   voyager history recheck
+    ///
+    ///   # Clean old entries
+    ///   voyager history clean --older-than 30
+    ///
+    ///   # Show statistics
+    ///   voyager history stats
+    History(HistoryArgs),
 }
 
-fn license_value_parser(license: &str) -> Result<LicenseId, String> {
+pub fn license_value_parser(license: &str) -> Result<LicenseId, String> {
     // First try for exact SPDX identifier match
     if let Some(id) = spdx::license_id(license) {
         return Ok(id);
@@ -302,7 +329,7 @@ fn license_value_parser(license: &str) -> Result<LicenseId, String> {
     Err(format!("Unrecognized license: {license}{guess}"))
 }
 
-fn contract_name_value_parser(name: &str) -> Result<String, String> {
+pub fn contract_name_value_parser(name: &str) -> Result<String, String> {
     // Check for minimum length
     if name.is_empty() {
         return Err("Contract name cannot be empty".to_string());
@@ -367,7 +394,7 @@ fn package_name_value_parser(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct VerifyArgs {
     /// Network to verify on (mainnet, sepolia, dev). If not specified, --url is required
     #[arg(long, value_enum)]
@@ -396,7 +423,7 @@ pub struct VerifyArgs {
         value_name = "HASH",
         value_parser = ClassHash::new
     )]
-    pub class_hash: ClassHash,
+    pub class_hash: Option<ClassHash>,
 
     /// Wait indefinitely for verification result (polls until completion)
     #[arg(long, default_value_t = false)]
@@ -416,7 +443,7 @@ pub struct VerifyArgs {
         value_name = "NAME",
         value_parser = contract_name_value_parser
     )]
-    pub contract_name: String,
+    pub contract_name: Option<String>,
 
     /// Select specific package for verification (required for workspace projects)
     #[arg(
@@ -446,6 +473,23 @@ pub struct VerifyArgs {
     /// Show detailed error messages from the remote compiler
     #[arg(long, short = 'v', default_value_t = false)]
     pub verbose: bool,
+
+    /// Run interactive verification wizard
+    #[arg(long, default_value_t = false)]
+    pub wizard: bool,
+
+    /// Send desktop notifications when verification completes (requires --watch)
+    #[cfg(feature = "notifications")]
+    #[arg(long, default_value_t = false)]
+    pub notify: bool,
+
+    /// Stop batch verification on first failure (default: continue all)
+    #[arg(long, default_value_t = false)]
+    pub fail_fast: bool,
+
+    /// Delay in seconds between batch contract submissions (for rate limiting)
+    #[arg(long, value_name = "SECONDS")]
+    pub batch_delay: Option<u64>,
 }
 
 #[derive(clap::Args)]
@@ -464,6 +508,22 @@ pub struct StatusArgs {
     /// Show detailed error messages from the remote compiler
     #[arg(long, short = 'v', default_value_t = false)]
     pub verbose: bool,
+
+    /// Output format for status information
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputFormat {
+    /// Human-readable text with enhanced formatting
+    Text,
+
+    /// JSON format for programmatic parsing
+    Json,
+
+    /// Table format (primarily for batch operations)
+    Table,
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -486,17 +546,27 @@ pub struct Network {
 
 impl clap::FromArgMatches for Network {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
-        let url = matches
-            .get_one::<Url>("url")
-            .ok_or_else(|| {
-                clap::Error::raw(
-                    clap::error::ErrorKind::MissingRequiredArgument,
-                    "API URL is required when not using predefined networks",
-                )
-            })?
-            .clone();
+        // Check if wizard mode is enabled
+        let wizard_mode = matches.get_one::<bool>("wizard").copied().unwrap_or(false);
 
-        Ok(Self { url })
+        if wizard_mode {
+            // In wizard mode, provide a placeholder URL that will be replaced by the wizard
+            // SAFETY: Hardcoded URL is guaranteed to be valid
+            #[allow(clippy::unwrap_used)]
+            Ok(Self {
+                url: Url::parse("https://api.voyager.online/beta").unwrap(),
+            })
+        } else {
+            // Get URL from CLI args if provided, otherwise use a placeholder
+            // that will be replaced by config file or cause a validation error later
+            let url = matches.get_one::<Url>("url").cloned().unwrap_or_else(|| {
+                // SAFETY: Hardcoded URL is guaranteed to be valid
+                #[allow(clippy::unwrap_used)]
+                Url::parse("https://placeholder.invalid").unwrap()
+            });
+
+            Ok(Self { url })
+        }
     }
 
     fn from_arg_matches_mut(matches: &mut clap::ArgMatches) -> Result<Self, clap::Error> {
@@ -512,16 +582,17 @@ impl clap::FromArgMatches for Network {
         &mut self,
         matches: &mut clap::ArgMatches,
     ) -> Result<(), clap::Error> {
-        self.url = matches
-            .get_one::<Url>("url")
-            .ok_or_else(|| {
-                clap::Error::raw(
-                    clap::error::ErrorKind::MissingRequiredArgument,
-                    "API URL is required when not using predefined networks",
-                )
-            })?
-            .clone();
+        // Check if wizard mode is enabled
+        let wizard_mode = matches.get_one::<bool>("wizard").copied().unwrap_or(false);
 
+        if !wizard_mode {
+            // Get URL from CLI args if provided
+            if let Some(url) = matches.get_one::<Url>("url") {
+                self.url = url.clone();
+            }
+            // If not provided, keep existing URL (may be from config or placeholder)
+        }
+        // In wizard mode, keep the placeholder URL (will be replaced by wizard)
         Ok(())
     }
 }
@@ -532,7 +603,7 @@ impl clap::Args for Network {
         cmd.arg(
             clap::Arg::new("url")
                 .long("url")
-                .help("API endpoint URL (required when --network is not specified)")
+                .help("API endpoint URL (can also be set in .voyager.toml)")
                 .value_hint(clap::ValueHint::Url)
                 .value_parser(Url::parse)
                 .default_value_ifs([
@@ -543,8 +614,7 @@ impl clap::Args for Network {
                         "https://sepolia-api.voyager.online/beta",
                     ),
                     ("network", "dev", "https://dev-api.voyager.online/beta"),
-                ])
-                .required_unless_present("network"),
+                ]),
         )
     }
 
@@ -552,7 +622,7 @@ impl clap::Args for Network {
         cmd.arg(
             clap::Arg::new("url")
                 .long("url")
-                .help("API endpoint URL (required when --network is not specified)")
+                .help("API endpoint URL (can also be set in .voyager.toml)")
                 .value_hint(clap::ValueHint::Url)
                 .value_parser(Url::parse)
                 .default_value_ifs([
@@ -563,8 +633,243 @@ impl clap::Args for Network {
                         "https://sepolia-api.voyager.online/beta",
                     ),
                     ("network", "dev", "https://dev-api.voyager.online/beta"),
-                ])
-                .required_unless_present("network"),
+                ]),
         )
     }
+}
+
+impl VerifyArgs {
+    /// Detect if batch mode should be used based on config
+    pub fn is_batch_mode(&self, config: &Option<crate::config::Config>) -> bool {
+        config
+            .as_ref()
+            .map(|cfg| !cfg.contracts.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Merge configuration file values with CLI arguments
+    /// CLI arguments take precedence over config file values
+    pub fn merge_with_config(mut self, config: &crate::config::Config) -> Self {
+        // Merge network if not provided via CLI
+        if self.network.is_none() {
+            self.network = config.parse_network();
+        }
+
+        // Merge license if not provided via CLI
+        if self.license.is_none() {
+            if let Some(ref license_str) = config.voyager.license {
+                self.license = license_value_parser(license_str).ok();
+            }
+        }
+
+        // Merge watch flag (only if not explicitly set via CLI)
+        // Note: clap sets default_value_t, so we need to check if it was actually provided
+        // For now, we'll use the config value if it exists
+        if let Some(watch) = config.voyager.watch {
+            if !self.watch {
+                // Only override if CLI value is false (the default)
+                self.watch = watch;
+            }
+        }
+
+        // Merge test_files flag
+        if let Some(test_files) = config.voyager.test_files {
+            if !self.test_files {
+                self.test_files = test_files;
+            }
+        }
+
+        // Merge lock_file flag
+        if let Some(lock_file) = config.voyager.lock_file {
+            if !self.lock_file {
+                self.lock_file = lock_file;
+            }
+        }
+
+        // Merge verbose flag
+        if let Some(verbose) = config.voyager.verbose {
+            if !self.verbose {
+                self.verbose = verbose;
+            }
+        }
+
+        // Merge notify flag
+        #[cfg(feature = "notifications")]
+        if let Some(notify) = config.voyager.notify {
+            if !self.notify {
+                self.notify = notify;
+            }
+        }
+
+        // Merge package if not provided via CLI
+        if self.package.is_none() {
+            self.package = config.workspace.default_package.clone();
+        }
+
+        // Merge project_type if specified in config
+        if let Some(ref project_type_str) = config.voyager.project_type {
+            // Only override if still set to Auto
+            if matches!(self.project_type, ProjectType::Auto) {
+                self.project_type = match project_type_str.to_lowercase().as_str() {
+                    "scarb" => ProjectType::Scarb,
+                    "dojo" => ProjectType::Dojo,
+                    "auto" => ProjectType::Auto,
+                    _ => self.project_type, // Keep existing if invalid
+                };
+            }
+        }
+
+        // Merge URL if provided in config and not set via CLI or network flag
+        // Check if URL is still the placeholder (means neither --url nor --network was provided)
+        if self.network_url.url.as_str() == "https://placeholder.invalid/" {
+            if let Some(ref url_str) = config.voyager.url {
+                if let Ok(parsed_url) = Url::parse(url_str) {
+                    self.network_url.url = parsed_url;
+                }
+            }
+        }
+
+        self
+    }
+
+    /// Validate that all required fields are set after config merging
+    pub fn validate(&self) -> Result<(), String> {
+        // Check if URL is still the placeholder (means no network, no url, and no config)
+        if self.network_url.url.as_str() == "https://placeholder.invalid/" {
+            return Err(
+                "API URL is required. Provide --network, --url, or set 'network' or 'url' in .voyager.toml".to_string()
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl StatusArgs {
+    /// Merge configuration file values with CLI arguments
+    /// CLI arguments take precedence over config file values
+    pub fn merge_with_config(mut self, config: &crate::config::Config) -> Self {
+        // Merge network if not provided via CLI
+        if self.network.is_none() {
+            self.network = config.parse_network();
+        }
+
+        // Merge verbose flag
+        if let Some(verbose) = config.voyager.verbose {
+            if !self.verbose {
+                self.verbose = verbose;
+            }
+        }
+
+        // Merge format if provided in config and not explicitly set via CLI
+        // Check if format is still default "text" (means not explicitly set via CLI)
+        if self.format == OutputFormat::Text {
+            if let Some(ref format_str) = config.voyager.format {
+                match format_str.to_lowercase().as_str() {
+                    "json" => self.format = OutputFormat::Json,
+                    "table" => self.format = OutputFormat::Table,
+                    "text" => self.format = OutputFormat::Text,
+                    _ => {} // Keep default if invalid format in config
+                }
+            }
+        }
+
+        // Merge URL if provided in config and not set via CLI or network flag
+        // Check if URL is still the placeholder (means neither --url nor --network was provided)
+        if self.network_url.url.as_str() == "https://placeholder.invalid/" {
+            if let Some(ref url_str) = config.voyager.url {
+                if let Ok(parsed_url) = Url::parse(url_str) {
+                    self.network_url.url = parsed_url;
+                }
+            }
+        }
+
+        self
+    }
+
+    /// Validate that all required fields are set after config merging
+    pub fn validate(&self) -> Result<(), String> {
+        // Check if URL is still the placeholder (means no network, no url, and no config)
+        if self.network_url.url.as_str() == "https://placeholder.invalid/" {
+            return Err(
+                "API URL is required. Provide --network, --url, or set 'network' or 'url' in .voyager.toml".to_string()
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(clap::Args)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub command: HistoryCommands,
+}
+
+#[derive(clap::Subcommand)]
+pub enum HistoryCommands {
+    /// List verification jobs from history
+    List {
+        /// Filter by status (Success, Fail, `CompileFailed`, Submitted, Processing, Compiled)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by network (mainnet, sepolia, dev)
+        #[arg(long)]
+        network: Option<String>,
+
+        /// Limit the number of results
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Get detailed status of a verification job from history
+    Status {
+        /// Verification job ID (UUID format)
+        #[arg(long, value_name = "UUID")]
+        job: String,
+
+        /// Network to verify on (mainnet, sepolia, dev). If not specified, --url is required
+        #[arg(long, value_enum)]
+        network: Option<NetworkKind>,
+
+        #[command(flatten)]
+        network_url: Network,
+
+        /// Re-check the status from the API and update local database
+        #[arg(long, default_value_t = false)]
+        refresh: bool,
+
+        /// Show detailed error messages from the remote compiler
+        #[arg(long, short = 'v', default_value_t = false)]
+        verbose: bool,
+    },
+
+    /// Re-check status of all pending verification jobs
+    Recheck {
+        /// Network to verify on (mainnet, sepolia, dev). If not specified, --url is required
+        #[arg(long, value_enum)]
+        network: Option<NetworkKind>,
+
+        #[command(flatten)]
+        network_url: Network,
+
+        /// Show detailed error messages from the remote compiler
+        #[arg(long, short = 'v', default_value_t = false)]
+        verbose: bool,
+    },
+
+    /// Clean old verification records from history
+    Clean {
+        /// Delete records older than N days
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u32>,
+
+        /// Delete all records (use with caution)
+        #[arg(long, default_value_t = false)]
+        all: bool,
+    },
+
+    /// Show verification history statistics
+    Stats,
 }

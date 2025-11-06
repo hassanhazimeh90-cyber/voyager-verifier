@@ -336,6 +336,9 @@ pub enum CliError {
     Api(#[from] ApiClientError),
 
     #[error(transparent)]
+    ClassHash(#[from] crate::class_hash::ClassHashError),
+
+    #[error(transparent)]
     MissingPackage(#[from] MissingPackage),
 
     #[error("[E015] Class hash '{0}' is not declared\n\nSuggestions:\n  • Verify the class hash is correct\n  • Check that the contract has been declared on the network\n  • Ensure you're using the correct network (mainnet/testnet)\n  • Use a block explorer to verify the class hash exists")]
@@ -390,6 +393,9 @@ pub enum CliError {
 
     #[error("[E027] Interactive prompt failed\n\nSuggestions:\n  • Use --project-type=scarb or --project-type=dojo to skip prompt\n  • Ensure terminal supports interactive input\n  • Check that stdin is available")]
     InteractivePromptFailed(#[from] dialoguer::Error),
+
+    #[error("[E028] Internal error: {message}\n\nThis is an internal error that should not occur. Please report this issue with:\n  • The full command you ran\n  • The context in which this error occurred\n  • Any relevant logs or output")]
+    InternalError { message: String },
 }
 
 impl CliError {
@@ -397,6 +403,7 @@ impl CliError {
         match self {
             Self::Args(_) => "E020",
             Self::Api(e) => e.error_code(),
+            Self::ClassHash(e) => e.error_code(),
             Self::MissingPackage(e) => e.error_code().as_str(),
             Self::NotDeclared(_) => "E015",
             Self::NoTarget => "E016",
@@ -411,6 +418,7 @@ impl CliError {
             Self::InvalidProjectType { .. } => "E025",
             Self::DojoValidationFailed => "E026",
             Self::InteractivePromptFailed(_) => "E027",
+            Self::InternalError { .. } => "E028",
         }
     }
 }

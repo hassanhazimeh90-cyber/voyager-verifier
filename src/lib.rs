@@ -65,3 +65,18 @@ pub mod verification;
 
 /// File collection, validation, and preparation for verification
 pub mod file_collector;
+
+/// Interactive verification wizard for guided contract verification
+pub mod wizard;
+
+/// Configuration file support for .voyager.toml files
+pub mod config;
+
+/// Verification history tracking and local database management
+pub mod history;
+
+/// Desktop notification support for verification completion
+pub mod notifications;
+
+/// Enhanced status output formatting with progress bars and JSON support
+pub mod status_output;
