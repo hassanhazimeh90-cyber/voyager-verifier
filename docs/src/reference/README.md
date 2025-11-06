@@ -101,7 +101,7 @@ Complete API documentation for developers.
 | Cairo | Server-determined | Up to 2.13.1 (Oct 2025) |
 | Scarb | Client + Server | 1.x - 2.x |
 | Dojo | Auto-detected | Up to 1.8.0 (Oct 2025) |
-| Client | Semantic Versioning | v2.0.0-alpha.5 |
+| Client | Semantic Versioning | v2.0.1 |
 
 ---
 

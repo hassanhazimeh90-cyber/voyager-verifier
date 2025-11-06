@@ -51,7 +51,7 @@ voyager --version
 You should see output like:
 
 ```
-voyager-verifier 2.0.0-alpha.5
+voyager-verifier 2.0.1
 ```
 
 ## Managing Versions
@@ -134,7 +134,7 @@ asdf plugin remove voyager
 For project-specific version management, create a `.tool-versions` file in your project directory:
 
 ```bash
-echo "voyager 2.0.0-alpha.5" > .tool-versions
+echo "voyager 2.0.1" > .tool-versions
 ```
 
 When you `cd` into this directory, asdf will automatically use the specified version.

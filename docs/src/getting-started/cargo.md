@@ -46,7 +46,7 @@ This will download, compile, and install the `voyager` binary to `~/.cargo/bin/`
 To install a specific version:
 
 ```bash
-cargo install voyager-verifier --version 2.0.0-alpha.5
+cargo install voyager-verifier --version 2.0.1
 ```
 
 ### Install from Git Repository
@@ -99,7 +99,7 @@ voyager --version
 You should see:
 
 ```
-voyager-verifier 2.0.0-alpha.5
+voyager-verifier 2.0.1
 ```
 
 Check the installation path:

@@ -8,7 +8,7 @@ This reference documents version compatibility for Voyager Verifier, including C
 |-----------|---------------|-----------------|-------|
 | **Cairo/Scarb** | Server-determined | Up to 2.13.1 (Oct 2025) | Version agnostic client |
 | **Dojo** | Auto-detected | Up to 1.8.0 (Oct 2025) | Extracted from dependencies |
-| **Client** | Independent versioning | v2.0.0-alpha.5 | Update via `asdf` |
+| **Client** | Independent versioning | v2.0.1 | Update via `asdf` |
 
 **Note:** Voyager version and supported toolchain versions are independent. The Voyager team continuously works to support the latest Scarb and Dojo releases.
 

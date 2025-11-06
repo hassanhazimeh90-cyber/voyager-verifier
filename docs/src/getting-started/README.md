@@ -41,7 +41,7 @@ voyager --version
 You should see output similar to:
 
 ```
-voyager-verifier 2.0.0-alpha.5
+voyager-verifier 2.0.1
 ```
 
 ## Next Steps
