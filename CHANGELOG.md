@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [2.0.0] - 2025-11-06
+
 ### Summary
 Major release focused on workflow efficiency, user experience, and automation capabilities.
 This release includes comprehensive feature additions and represents a significant evolution
