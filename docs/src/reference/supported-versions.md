@@ -442,17 +442,9 @@ voyager verify --dry-run \
 
 The Voyager API manages version support server-side:
 
-**Version Endpoints:**
+**Version Checking:**
 
-```bash
-# Check API health (implicit version check)
-curl https://api.voyager.online/api-docs
-
-# Verify endpoint (will reject unsupported versions)
-curl -X POST https://api.voyager.online/verify \
-  -H "Content-Type: application/json" \
-  -d '{...}'
-```
+The CLI tool automatically validates version compatibility when submitting verification jobs. Unsupported versions will be rejected with an appropriate error message.
 
 ### Version Update Timeline
 

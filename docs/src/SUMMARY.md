@@ -77,7 +77,7 @@
   - [Error Codes](./reference/error-codes.md)
   - [Supported Versions](./reference/supported-versions.md)
   - [File Collection](./reference/file-collection.md)
-  - [API Endpoints](./reference/api.md)
+  - [API Reference](./reference/api.md)
 
 # Contributing
 

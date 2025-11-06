@@ -332,17 +332,15 @@ voyager verify --class-hash $HASH --contract-name MyContract
 
 ### Endpoint Requirements
 
-Custom endpoints must implement the Voyager API specification:
+Custom endpoints must implement the Voyager API specification to work with the CLI tool:
 
-**Required endpoints:**
-- `POST /verify` - Submit verification job
-- `GET /verify/{job_id}` - Check verification status
-
-**API contract:**
-- Accept verification submissions with contract source files
+**Required functionality:**
+- Accept verification submissions through the CLI tool
 - Return job ID on successful submission
 - Provide status updates via job ID query
 - Support the same status values (Submitted, Processing, Compiled, Success, Fail, CompileFailed)
+
+**Note:** The CLI tool handles all API communication. Users should not make direct API calls.
 
 ### Version Compatibility
 
