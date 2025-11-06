@@ -5,15 +5,13 @@
 //! - Validating file types and sizes
 //! - Adding manifest files (Scarb.toml, workspace manifests)
 //! - Finding contract files
-//! - Converting paths to FileInfo structures
+//! - Converting paths to `FileInfo` structures
 //! - Logging verification information
 
+use super::resolver;
 use crate::api::FileInfo;
-use crate::args::VerifyArgs;
-use crate::errors::CliError;
-use crate::license;
-use crate::resolver;
-use crate::voyager;
+use crate::cli::args::VerifyArgs;
+use crate::utils::{errors::CliError, license, voyager};
 use camino::{Utf8Path, Utf8PathBuf};
 use itertools::Itertools;
 use log::{debug, info, warn};
@@ -48,19 +46,18 @@ pub fn prepare_project_for_verification(
     args: &VerifyArgs,
     metadata: &scarb_metadata::Metadata,
     packages: &[PackageMetadata],
-    sources: Vec<Utf8PathBuf>,
+    sources: &[Utf8PathBuf],
 ) -> Result<(Vec<FileInfo>, PackageMetadata, String, String), CliError> {
-    let prefix = resolver::biggest_common_prefix(&sources, args.path.root_dir());
+    let prefix = resolver::biggest_common_prefix(sources, args.path.root_dir());
 
     // Build file map
-    let files = build_file_map(&sources, &prefix, metadata, args)?;
+    let files = build_file_map(sources, &prefix, metadata, args)?;
 
     // Filter packages and get the target package
-    let filtered_packages: Vec<&PackageMetadata> = if let Some(package_id) = &args.package {
-        packages.iter().filter(|p| p.name == *package_id).collect()
-    } else {
-        packages.iter().collect()
-    };
+    let filtered_packages: Vec<&PackageMetadata> = args.package.as_ref().map_or_else(
+        || packages.iter().collect(),
+        |package_id| packages.iter().filter(|p| p.name == *package_id).collect(),
+    );
 
     let package_meta = filtered_packages
         .first()
@@ -75,7 +72,7 @@ pub fn prepare_project_for_verification(
         })?;
 
     // Find contract file
-    let contract_file_path = find_contract_file(package_meta, &sources, contract_name)?;
+    let contract_file_path = find_contract_file(package_meta, sources, contract_name)?;
     let contract_file =
         contract_file_path
             .strip_prefix(&prefix)
@@ -162,7 +159,9 @@ pub fn build_file_map(
 /// # Errors
 ///
 /// Returns a `CliError` if any file exceeds the size limit or has invalid type
-pub fn validate_file_sizes(files: &HashMap<String, Utf8PathBuf>) -> Result<(), CliError> {
+pub fn validate_file_sizes<S: std::hash::BuildHasher>(
+    files: &HashMap<String, Utf8PathBuf, S>,
+) -> Result<(), CliError> {
     const MAX_FILE_SIZE: usize = 1024 * 1024 * 20; // 20MB limit
 
     for path in files.values() {
@@ -171,7 +170,7 @@ pub fn validate_file_sizes(files: &HashMap<String, Utf8PathBuf>) -> Result<(), C
 
         // Validate file size
         if let Ok(metadata) = std::fs::metadata(path) {
-            let size = metadata.len() as usize;
+            let size = usize::try_from(metadata.len()).unwrap_or(MAX_FILE_SIZE + 1);
             if size > MAX_FILE_SIZE {
                 return Err(CliError::FileSizeLimit {
                     path: path.clone(),
@@ -250,8 +249,8 @@ pub fn validate_file_type(path: &Utf8PathBuf) -> Result<(), CliError> {
 /// # Errors
 ///
 /// Returns a `CliError` if path manipulation fails
-pub fn add_manifest_files(
-    files: &mut HashMap<String, Utf8PathBuf>,
+pub fn add_manifest_files<S: std::hash::BuildHasher>(
+    files: &mut HashMap<String, Utf8PathBuf, S>,
     metadata: &scarb_metadata::Metadata,
     prefix: &Utf8Path,
 ) -> Result<(), CliError> {
@@ -284,8 +283,8 @@ pub fn add_manifest_files(
 /// # Errors
 ///
 /// Returns a `CliError` if path manipulation fails
-pub fn add_workspace_manifest_if_needed(
-    files: &mut HashMap<String, Utf8PathBuf>,
+pub fn add_workspace_manifest_if_needed<S: std::hash::BuildHasher>(
+    files: &mut HashMap<String, Utf8PathBuf, S>,
     metadata: &scarb_metadata::Metadata,
     prefix: &Utf8Path,
 ) -> Result<(), CliError> {
@@ -327,8 +326,8 @@ pub fn add_workspace_manifest_if_needed(
 /// # Errors
 ///
 /// Returns a `CliError` if path manipulation fails
-pub fn add_lock_file_if_requested(
-    files: &mut HashMap<String, Utf8PathBuf>,
+pub fn add_lock_file_if_requested<S: std::hash::BuildHasher>(
+    files: &mut HashMap<String, Utf8PathBuf, S>,
     args: &VerifyArgs,
     prefix: &Utf8Path,
 ) -> Result<(), CliError> {
@@ -381,14 +380,13 @@ pub fn find_contract_file(
     // First, search for the actual contract definition pattern
     // Look for #[starknet::contract] followed by mod <ContractName>
     debug!(
-        "Searching for contract definition pattern: #[starknet::contract] + mod {}",
-        contract_name
+        "Searching for contract definition pattern: #[starknet::contract] + mod {contract_name}"
     );
 
     if let Some(contract_file) =
         find_contract_by_pattern(sources, contract_name, &package_meta.root)
     {
-        debug!("Found contract definition in: {}", contract_file);
+        debug!("Found contract definition in: {contract_file}");
         return Ok(contract_file);
     }
 
@@ -409,7 +407,7 @@ pub fn find_contract_file(
     for path in contract_specific_paths {
         let full_path = package_meta.root.join(&path);
         if full_path.exists() {
-            debug!("Found contract file via heuristic: {}", full_path);
+            debug!("Found contract file via heuristic: {full_path}");
             return Ok(full_path);
         }
     }
@@ -421,8 +419,7 @@ pub fn find_contract_file(
         let full_path = package_meta.root.join(path);
         if full_path.exists() {
             warn!(
-                "Using fallback main file {} - could not find specific contract file for {}",
-                path, contract_name
+                "Using fallback main file {path} - could not find specific contract file for {contract_name}"
             );
             return Ok(full_path);
         }
@@ -437,8 +434,7 @@ pub fn find_contract_file(
         .ok_or(CliError::NoTarget)?;
 
     warn!(
-        "Using first Cairo file {} - could not find specific contract file for {}",
-        contract_file_path, contract_name
+        "Using first Cairo file {contract_file_path} - could not find specific contract file for {contract_name}"
     );
     Ok(contract_file_path)
 }
@@ -481,12 +477,12 @@ fn find_contract_by_pattern(
         match std::fs::read_to_string(file_path) {
             Ok(content) => {
                 if contains_contract_definition(&content, contract_name) {
-                    debug!("Found contract '{}' in file: {}", contract_name, file_path);
+                    debug!("Found contract '{contract_name}' in file: {file_path}");
                     return Some(file_path.clone());
                 }
             }
             Err(e) => {
-                debug!("Failed to read file {}: {}", file_path, e);
+                debug!("Failed to read file {file_path}: {e}");
             }
         }
     }
@@ -558,11 +554,9 @@ fn extract_module_name(line: &str) -> Option<String> {
     let trimmed = line.trim();
 
     // Remove "pub " prefix if present
-    let without_pub = if let Some(rest) = trimmed.strip_prefix("pub ") {
-        rest.trim()
-    } else {
-        trimmed
-    };
+    let without_pub = trimmed
+        .strip_prefix("pub ")
+        .map_or(trimmed, |rest| rest.trim());
 
     // Check for "mod " prefix
     if let Some(rest) = without_pub.strip_prefix("mod ") {
@@ -624,7 +618,10 @@ pub fn prepare_project_dir_path(
 /// # Returns
 ///
 /// Returns a vector of `FileInfo` structures
-pub fn convert_to_file_info(files: HashMap<String, Utf8PathBuf>) -> Vec<FileInfo> {
+#[must_use]
+pub fn convert_to_file_info<S: std::hash::BuildHasher>(
+    files: HashMap<String, Utf8PathBuf, S>,
+) -> Vec<FileInfo> {
     files
         .into_iter()
         .map(|(name, path)| FileInfo {
@@ -663,10 +660,7 @@ pub fn log_verification_info(
     // If it's not, we'll use a placeholder to avoid panicking during logging
     let contract_name = args.contract_name.as_deref().unwrap_or("<unknown>");
 
-    info!(
-        "Verifying contract: {} from {}",
-        contract_name, contract_file
-    );
+    info!("Verifying contract: {contract_name} from {contract_file}");
     info!("licensed with: {}", license_info.display_string());
     info!("using cairo: {cairo_version} and scarb {scarb_version}");
     info!("These are the files that will be used for verification:");

@@ -1,7 +1,7 @@
 use thiserror::Error;
 use url::Url;
 
-use crate::errors::RequestFailure;
+use crate::utils::errors::RequestFailure;
 
 #[derive(Debug, Error)]
 pub enum VerificationError {
@@ -13,6 +13,7 @@ pub enum VerificationError {
 }
 
 impl VerificationError {
+    #[must_use]
     pub const fn error_code(&self) -> &'static str {
         match self {
             Self::CompilationFailure(_) => "E004",
@@ -20,6 +21,7 @@ impl VerificationError {
         }
     }
 
+    #[must_use]
     pub fn suggestions(&self) -> Vec<&'static str> {
         match self {
             Self::CompilationFailure(msg) => {
@@ -90,6 +92,7 @@ pub enum ApiClientError {
 }
 
 impl ApiClientError {
+    #[must_use]
     pub const fn error_code(&self) -> &'static str {
         match self {
             Self::CannotBeBase(_) => "E006",

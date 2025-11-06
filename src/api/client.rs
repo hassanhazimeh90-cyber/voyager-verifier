@@ -8,7 +8,7 @@ use reqwest::{
 };
 use url::Url;
 
-use crate::{class_hash::ClassHash, errors::RequestFailure};
+use crate::{core::class_hash::ClassHash, utils::errors::RequestFailure};
 
 use super::errors::{ApiClientError, VerificationError};
 use super::models::{
@@ -55,7 +55,7 @@ impl ApiClient {
         let mut url = self.base.clone();
         let url_clone = url.clone();
         url.path_segments_mut()
-            .map_err(|_| ApiClientError::CannotBeBase(url_clone))?
+            .map_err(|()| ApiClientError::CannotBeBase(url_clone))?
             .extend(&["classes", class_hash.as_ref()]);
         Ok(url)
     }
@@ -90,7 +90,7 @@ impl ApiClient {
         let mut url = self.base.clone();
         let url_clone = url.clone();
         url.path_segments_mut()
-            .map_err(|_| ApiClientError::CannotBeBase(url_clone))?
+            .map_err(|()| ApiClientError::CannotBeBase(url_clone))?
             .extend(&["class-verify", class_hash.as_ref()]);
         Ok(url)
     }
@@ -147,24 +147,22 @@ impl ApiClient {
         files: &[FileInfo],
     ) -> Result<String, ApiClientError> {
         // Prepare license value
-        let license_value = if let Some(lic) = license {
-            if lic == "MIT" {
-                "MIT".to_string()
-            } else {
-                lic
-            }
-        } else {
-            "NONE".to_string()
-        };
+        let license_value = license.map_or_else(
+            || "NONE".to_string(),
+            |lic| if lic == "MIT" { "MIT".to_string() } else { lic },
+        );
 
         // Add Dojo version if available
-        let dojo_version = if let Some(ref dojo_version) = project_metadata.dojo_version {
-            info!("📤 Adding dojo_version to API request: {dojo_version}");
-            Some(dojo_version.clone())
-        } else {
-            debug!("📤 No dojo_version to include in API request");
-            None
-        };
+        let dojo_version = project_metadata.dojo_version.as_ref().map_or_else(
+            || {
+                debug!("📤 No dojo_version to include in API request");
+                None
+            },
+            |dojo_version| {
+                info!("📤 Adding dojo_version to API request: {dojo_version}");
+                Some(dojo_version.clone())
+            },
+        );
 
         info!(
             "🌐 API request payload prepared - build_tool: '{}', dojo_version: {:?}",
@@ -216,7 +214,7 @@ impl ApiClient {
         debug!("🏗️  Request Method: POST");
         debug!("📦 Content-Type: application/json");
         if let Ok(json_str) = serde_json::to_string_pretty(&request_body) {
-            debug!("📋 Request Body: {}", json_str);
+            debug!("📋 Request Body: {json_str}");
         }
         debug!("📊 Total files: {}", files.len());
         debug!("🚀 === END API REQUEST PAYLOAD ===");
@@ -265,7 +263,7 @@ impl ApiClient {
         let mut url = self.base.clone();
         let url_clone = url.clone();
         url.path_segments_mut()
-            .map_err(|_| ApiClientError::CannotBeBase(url_clone))?
+            .map_err(|()| ApiClientError::CannotBeBase(url_clone))?
             .extend(&["class-verify", "job", job_id.as_ref()]);
         Ok(url)
     }
@@ -402,10 +400,7 @@ impl ApiClient {
     ///
     /// Will return `Err` on network error or if the verification has failed.
     pub fn get_verification_job(&self, job_id: &str) -> Result<VerificationJob, ApiClientError> {
-        match self.get_job_status(job_id)? {
-            Some(job) => Ok(job),
-            None => Err(ApiClientError::InProgress),
-        }
+        (self.get_job_status(job_id)?).map_or_else(|| Err(ApiClientError::InProgress), Ok)
     }
 }
 
@@ -442,6 +437,10 @@ pub fn poll_verification_status(
 /// * `api` - The API client
 /// * `job_id` - The verification job ID
 /// * `callback` - Optional callback function that receives the current `VerificationJob` status
+///
+/// # Errors
+///
+/// Returns an error if the API request fails or the job is not found
 pub fn poll_verification_status_with_callback(
     api: &ApiClient,
     job_id: &str,

@@ -13,7 +13,7 @@
 //! ## Example Usage
 //!
 //! ```rust
-//! use verifier::class_hash::ClassHash;
+//! use verifier::core::class_hash::ClassHash;
 //!
 //! // Valid class hash
 //! let hash = ClassHash::new("0x044dc2b3239382230d8b1e943df23b96f52eebcac93efe6e8bde92f9a2f1da18")?;
@@ -25,20 +25,17 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use lazy_static::lazy_static;
 use regex::Regex;
-use std::fmt;
+use std::{fmt, sync::LazyLock};
 use thiserror::Error;
 
-fn get_class_hash_regex() -> Result<&'static Regex, ClassHashError> {
-    lazy_static! {
-        static ref CLASS_HASH_REGEX: Result<Regex, regex::Error> = Regex::new(r"^0x[a-fA-F0-9]+$");
-    }
+static CLASS_HASH_REGEX: LazyLock<Result<Regex, regex::Error>> =
+    LazyLock::new(|| Regex::new(r"^0x[a-fA-F0-9]+$"));
 
-    match CLASS_HASH_REGEX.as_ref() {
-        Ok(regex) => Ok(regex),
-        Err(_) => Err(ClassHashError::RegexError),
-    }
+fn get_class_hash_regex() -> Result<&'static Regex, ClassHashError> {
+    CLASS_HASH_REGEX
+        .as_ref()
+        .map_or(Err(ClassHashError::RegexError), Ok)
 }
 
 /// A type-safe wrapper for Starknet class hashes.
@@ -56,7 +53,7 @@ fn get_class_hash_regex() -> Result<&'static Regex, ClassHashError> {
 /// ## Examples
 ///
 /// ```rust
-/// use verifier::class_hash::ClassHash;
+/// use verifier::core::class_hash::ClassHash;
 ///
 /// // Valid class hash
 /// let hash = ClassHash::new("0x044dc2b3239382230d8b1e943df23b96f52eebcac93efe6e8bde92f9a2f1da18")?;
@@ -87,6 +84,7 @@ pub enum ClassHashError {
 }
 
 impl ClassHashError {
+    #[must_use]
     pub const fn error_code(&self) -> &'static str {
         match self {
             Self::Match(_) => "E010",
@@ -117,7 +115,7 @@ impl ClassHash {
     /// # Examples
     ///
     /// ```rust
-    /// use verifier::class_hash::ClassHash;
+    /// use verifier::core::class_hash::ClassHash;
     ///
     /// // Valid class hash
     /// let hash = ClassHash::new("0x044dc2b3239382230d8b1e943df23b96f52eebcac93efe6e8bde92f9a2f1da18")?;
